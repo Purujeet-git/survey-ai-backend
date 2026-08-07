@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual Environment
+.venv/
+venv/
+
+# Environment Variables
+.env
+
+# VS Code
+.vscode/
+
+# Testing
+.pytest_cache/
+
+# Coverage
+.coverage
+
+# Logs
+*.log
+
+# Alembic
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+
+# Next.js
+.next/
+
+# Build
+dist/
+build/
+
+# Uploads
+uploads/
+
+# Generated Reports
+generated_reports/
+
+# MinIO Local Storage
+storage/
+
+# IDE
+.idea/
