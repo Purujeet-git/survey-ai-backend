@@ -13,7 +13,8 @@ from fastapi.responses import ORJSONResponse
 from app.api.router import api_router
 from app.config import settings
 from app.config.logging import configure_logging
-
+from app.shared.exceptions import SurveyAIException
+from app.shared.exceptions.handlers import survey_ai_exception_handler
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -35,6 +36,12 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
+)
+
+    
+app.add_exception_handler(
+    SurveyAIException,
+    survey_ai_exception_handler,
 )
 
 app.include_router(api_router)
