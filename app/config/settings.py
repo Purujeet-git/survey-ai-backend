@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     SECRET_KEY: str
 
     LOG_LEVEL: str
+    
+    DATABASE_URL:str
 
     model_config = SettingsConfigDict(
         env_file=".env",
