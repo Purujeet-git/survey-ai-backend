@@ -15,6 +15,7 @@ from app.config import settings
 from app.config.logging import configure_logging
 from app.shared.exceptions import SurveyAIException
 from app.shared.exceptions.handlers import survey_ai_exception_handler
+from app.shared.middleware.request_id import RequestIDMiddleware
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,6 +38,8 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+app.add_middleware(RequestIDMiddleware)
 
     
 app.add_exception_handler(

@@ -7,19 +7,16 @@ Psycopg asynchronous database connections.
 
 import asyncio
 
-import pytest
 
-
-@pytest.fixture(scope="session")
-def event_loop_policy():
+def pytest_configure(config):
     """
-    Use the Selector event loop on Windows.
+    Configure the Windows event loop policy for pytest.
 
-    Psycopg asynchronous connections are incompatible
-    with the Windows ProactorEventLoop.
+    Psycopg asynchronous connections require the Selector
+    event loop on Windows.
     """
 
     if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
-        return asyncio.WindowsSelectorEventLoopPolicy()
-
-    return asyncio.DefaultEventLoopPolicy()
+        asyncio.set_event_loop_policy(
+            asyncio.WindowsSelectorEventLoopPolicy()
+        )
