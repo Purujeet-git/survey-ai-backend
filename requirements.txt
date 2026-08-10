@@ -17,3 +17,5 @@ structlog>=25.4,<26
 
 pytest
 pytest-asyncio
+
+email-validator
