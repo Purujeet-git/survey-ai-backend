@@ -16,6 +16,7 @@ from app.shared.exceptions import NotFoundError
 from app.users.models import User
 from app.users.repositories import UserRepository
 from app.users.schemas import UserCreate, UserUpdate
+from app.auth.service import AuthService
 
 
 class UserService:
@@ -26,11 +27,11 @@ class UserService:
     def __init__(self, session: AsyncSession):
         self.session = session
         self.repository = UserRepository(session)
+        self.auth_service = AuthService()
 
     async def create_user(
         self,
         data: UserCreate,
-        password_hash: str,
     ) -> User:
         existing_user = await self.repository.get_by_email(
             data.email
@@ -41,6 +42,11 @@ class UserService:
                 "A user with this email already exists."
             )
 
+        password_hash = self.auth_service.hash_password(
+            data.password
+        )
+        
+        
         user = await self.repository.create(
             email=data.email,
             password_hash=password_hash,

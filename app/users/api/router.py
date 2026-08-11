@@ -40,14 +40,7 @@ async def create_user(
 
     service = UserService(session)
 
-    # Authentication will provide the real password hash later.
-    # For Task 2.1 we keep hashing outside this domain.
-    password_hash = data.password
-
-    user = await service.create_user(
-        data,
-        password_hash=password_hash,
-    )
+    user = await service.create_user(data)
 
     return UserResponse.model_validate(user)
 
