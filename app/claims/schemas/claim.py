@@ -26,6 +26,8 @@ class ClaimCreate(BaseModel):
 
     policy_number: str | None = None
     registration_number: str | None = None
+    organization_id: UUID | None = None
+    assigned_to_id: UUID | None = None
 
     chassis_number: str | None = None
     engine_number: str | None = None
@@ -72,6 +74,8 @@ class ClaimUpdate(BaseModel):
 
     policy_number: str | None = None
     registration_number: str | None = None
+    organization_id: UUID | None = None
+    assigned_to_id: UUID | None = None
 
     chassis_number: str | None = None
     engine_number: str | None = None
@@ -103,6 +107,15 @@ class ClaimUpdate(BaseModel):
     extra_data: dict | None = None
 
 
+class ClaimStatusUpdate(BaseModel):
+    """
+    Schema for updating claim status through workflow state machine.
+    """
+
+    status: str = Field(min_length=1, max_length=30)
+    reason: str | None = None
+
+
 class ClaimResponse(BaseModel):
     """
     API representation of a claim.
@@ -114,6 +127,8 @@ class ClaimResponse(BaseModel):
 
     id: UUID
     user_id: UUID
+    organization_id: UUID | None
+    assigned_to_id: UUID | None
 
     claim_number: str
 
@@ -150,4 +165,4 @@ class ClaimResponse(BaseModel):
     extra_data: dict
 
     created_at: datetime
-    updated_at: datetime
+    updated_at: datetime

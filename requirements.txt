@@ -23,3 +23,7 @@ email-validator
 PyJWT
 piexif
 Pillow
+openpyxl
+python-docx
+langgraph
+langchain

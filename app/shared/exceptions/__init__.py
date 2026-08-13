@@ -12,6 +12,10 @@ from app.shared.exceptions.common import (
     ValidationError,
 )
 
+ValidationException = ValidationError
+ConflictException = ConflictError
+NotFoundException = NotFoundError
+
 __all__ = [
     "SurveyAIException",
     "ValidationError",
@@ -20,4 +24,7 @@ __all__ = [
     "AuthorizationError",
     "ConflictError",
     "ExternalServiceError",
-]
+    "ValidationException",
+    "ConflictException",
+    "NotFoundException",
+]

@@ -74,6 +74,22 @@ class ClaimRepository:
 
         return list(result.scalars().all())
 
+    async def list_by_organization(
+        self,
+        organization_id: UUID,
+    ) -> list[Claim]:
+        """
+        Retrieve all claims for an organization.
+        """
+
+        result = await self.session.execute(
+            select(Claim)
+            .where(Claim.organization_id == organization_id)
+            .order_by(Claim.created_at.desc())
+        )
+
+        return list(result.scalars().all())
+
     async def create(
         self,
         claim: Claim,
@@ -83,9 +99,8 @@ class ClaimRepository:
         """
 
         self.session.add(claim)
-
-        await self.session.flush()
-
+        await self.session.commit()
+        await self.session.refresh(claim)
         return claim
 
     async def update(
@@ -96,8 +111,8 @@ class ClaimRepository:
         Persist changes to an existing claim.
         """
 
-        await self.session.flush()
-
+        await self.session.commit()
+        await self.session.refresh(claim)
         return claim
 
     async def delete(
@@ -109,5 +124,4 @@ class ClaimRepository:
         """
 
         await self.session.delete(claim)
-
-        await self.session.flush()
+        await self.session.commit()

@@ -36,6 +36,9 @@ class UserCreate(BaseModel):
         max_length=30,
     )
 
+    organization_id: UUID | None = None
+    role: str = Field(default="surveyor", max_length=50)
+
 
 class UserUpdate(BaseModel):
     """
@@ -62,6 +65,9 @@ class UserUpdate(BaseModel):
         max_length=20,
     )
 
+    organization_id: UUID | None = None
+    role: str | None = Field(default=None, max_length=50)
+
 
 class UserResponse(BaseModel):
     """
@@ -73,9 +79,12 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    organization_id: UUID | None = None
+    role: str = "surveyor"
     email: EmailStr
     full_name: str
     mobile: str | None
     status: str
     created_at: datetime
     updated_at: datetime
+

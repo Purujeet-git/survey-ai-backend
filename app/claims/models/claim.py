@@ -21,14 +21,15 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.database.enums import ClaimStatus
 
 
 class Claim(Base):
     """
-    Represents an insurance survey claim belonging to a Surveyor.
+    Represents an insurance survey claim belonging to a Surveyor and Organization.
 
     Core claim information is stored in structured columns.
     Template-specific information is stored in extra_data.
@@ -54,6 +55,20 @@ class Claim(Base):
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
+    )
+
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    assigned_to_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
         index=True,
     )
 
@@ -180,7 +195,8 @@ class Claim(Base):
     status: Mapped[str] = mapped_column(
         String(30),
         nullable=False,
-        default="created",
+        default=ClaimStatus.DRAFT,
+        server_default=ClaimStatus.DRAFT,
         index=True,
     )
 
@@ -210,3 +226,19 @@ class Claim(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+    organization: Mapped["Organization | None"] = relationship(
+        "Organization",
+        back_populates="claims",
+    )
+
+    assigned_to: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[assigned_to_id],
+    )
+
+    timeline_events: Mapped[list["TimelineEvent"]] = relationship(
+        "TimelineEvent",
+        back_populates="claim",
+        cascade="all, delete-orphan",
+    )
