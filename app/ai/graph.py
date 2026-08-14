@@ -76,6 +76,45 @@ class ClaimAIPipelineService:
 
         return result_state
 
+    async def astream_pipeline(self, initial_state: ClaimState):
+        """
+        Stream stage-by-stage node execution events for real-time UI visualization.
+        """
+        claim_id = initial_state.get("claim_id", "")
+        existing_checkpoint = global_checkpointer.load_checkpoint(claim_id)
+        current_state = existing_checkpoint or initial_state
+
+        yield {
+            "event": "PIPELINE_STARTED",
+            "claim_id": claim_id,
+            "status": "in_progress",
+            "message": "Initiated LangGraph state machine execution.",
+        }
+
+        running_state = dict(current_state)
+
+        async for node_output in self.graph.astream(current_state):
+            for node_name, node_state_diff in node_output.items():
+                running_state.update(node_state_diff)
+                global_checkpointer.save_checkpoint(claim_id, running_state)
+
+                yield {
+                    "event": "NODE_COMPLETED",
+                    "node": node_name,
+                    "claim_id": claim_id,
+                    "status": running_state.get("status"),
+                    "current_node": node_name,
+                    "state_diff": node_state_diff,
+                    "execution_logs": running_state.get("execution_logs", [])[-1:] if running_state.get("execution_logs") else [],
+                }
+
+        yield {
+            "event": "PIPELINE_FINISHED",
+            "claim_id": claim_id,
+            "status": running_state.get("status"),
+            "final_state": running_state,
+        }
+
     def get_pipeline_state(self, claim_id: str) -> ClaimState | None:
         """
         Retrieve stored checkpoint state for a claim.

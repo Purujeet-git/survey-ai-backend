@@ -30,11 +30,20 @@ async def classification_node(state: ClaimState) -> dict:
         content_type = doc.get("content_type", "")
         text = doc.get("extracted_text", "")
 
-        doc_type, confidence, explanation = classifier.classify(
+        gemini_result = await classifier.classify_with_gemini(
             file_name=file_name,
             content_type=content_type,
             text=text,
         )
+
+        if gemini_result:
+            doc_type, confidence, explanation = gemini_result
+        else:
+            doc_type, confidence, explanation = classifier.classify(
+                file_name=file_name,
+                content_type=content_type,
+                text=text,
+            )
 
         results[doc_id] = {
             "file_name": file_name,

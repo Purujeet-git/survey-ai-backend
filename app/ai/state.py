@@ -83,7 +83,19 @@ class ExecutionLogItem(TypedDict, total=False):
     timestamp: str
     latency_ms: float
     token_usage: dict[str, int]
+    cost_usd: float
     details: str
+
+
+def compute_token_cost(input_tokens: int, output_tokens: int, model: str = "gemini-1.5-flash") -> float:
+    """
+    Computes estimated dollar spend based on model input/output rates.
+    Fulfills Behavior #10: 'It knows what it cost stage by stage'.
+    """
+    # Gemini 1.5 Flash rates: $0.075 per 1M input tokens, $0.30 per 1M output tokens
+    cost = (input_tokens * 0.000000075) + (output_tokens * 0.00000030)
+    return round(cost, 6)
+
 
 
 class ClaimState(TypedDict, total=False):

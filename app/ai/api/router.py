@@ -107,6 +107,82 @@ async def process_claim_ai(
 
 
 
+@router.post(
+    "/{claim_id}/ai/process-stream",
+    summary="Trigger AI Pipeline with Real-time SSE Event Streaming",
+)
+async def process_claim_ai_stream(
+    claim_id: UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Triggers or resumes the LangGraph AI processing pipeline, yielding Server-Sent Events (SSE) in real time.
+    """
+    import json
+    from fastapi.responses import StreamingResponse
+
+    claim_service = ClaimService(session)
+    document_service = DocumentService(session)
+
+    claim = await claim_service.get_claim(claim_id=claim_id, user_id=current_user.id)
+    documents = await document_service.list_claim_documents(claim_id=claim_id, latest_only=True)
+
+    doc_manifests = [
+        {
+            "id": str(d.id),
+            "file_name": d.file_name,
+            "document_type": d.document_type,
+            "content_type": d.content_type,
+            "storage_key": d.storage_key,
+            "file_size": d.file_size,
+            "extracted_text": d.extracted_text or "",
+            "doc_metadata": d.doc_metadata,
+        }
+        for d in documents
+    ]
+
+    initial_state: ClaimState = {
+        "claim_id": str(claim.id),
+        "claim_number": claim.claim_number,
+        "organization_id": str(claim.organization_id) if claim.organization_id else None,
+        "user_id": str(current_user.id),
+        "assigned_to_id": str(claim.assigned_to_id) if claim.assigned_to_id else None,
+        "status": "intake",
+        "documents": doc_manifests,
+        "classification_results": {},
+        "extracted_entities": {},
+        "accident_analysis": {},
+        "execution_logs": [],
+        "current_node": "START",
+        "error": None,
+    }
+
+    pipeline = ClaimAIPipelineService()
+
+    async def event_generator():
+        async for event in pipeline.astream_pipeline(initial_state):
+            # If pipeline finished, persist claim extra_data
+            if event.get("event") == "PIPELINE_FINISHED":
+                final_state = event.get("final_state", {})
+                if final_state.get("extracted_entities"):
+                    claim.extra_data = {
+                        **claim.extra_data,
+                        "ai_extracted_entities": final_state["extracted_entities"],
+                        "ai_accident_analysis": final_state.get("accident_analysis", {}),
+                        "ai_photo_analysis": final_state.get("photo_analysis", {}),
+                        "ai_expected_damage": final_state.get("expected_damage", {}),
+                        "ai_evidence_validation": final_state.get("evidence_validation", []),
+                        "ai_findings": final_state.get("findings", []),
+                    }
+                    await claim_service.update_claim(claim_id=claim.id, user_id=current_user.id, extra_data=claim.extra_data)
+
+            payload = json.dumps(event)
+            yield f"data: {payload}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @router.get(
     "/{claim_id}/ai/state",
     summary="Get AI Pipeline State and Checkpoint",
