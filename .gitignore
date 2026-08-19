@@ -52,6 +52,8 @@ storage/
 # Application storage adapters are source code, not runtime storage.
 !app/storage/
 !app/storage/*.py
+!app/surveys/storage/
+!app/surveys/storage/*.py
 
 # IDE
 .idea/
