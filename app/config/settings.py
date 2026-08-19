@@ -56,6 +56,8 @@ class Settings(BaseSettings):
                 1,
             )
 
+        self.FRONTEND_URL = self.FRONTEND_URL.rstrip("/")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=True,
