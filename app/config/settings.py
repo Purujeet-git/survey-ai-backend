@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
 
     GEMINI_API_KEY: str | None = None
+    FRONTEND_URL: str = "http://localhost:3000"
 
     model_config = SettingsConfigDict(
         env_file=".env",

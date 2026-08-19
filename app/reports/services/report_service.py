@@ -18,7 +18,7 @@ from app.documents.services.document_service import DocumentService
 from app.reports.models.report import SurveyReport
 from app.reports.services.docx_service import WordReportService
 from app.reports.services.excel_service import ExcelAssessmentService
-from app.shared.exceptions import NotFoundException
+from app.shared.exceptions import NotFoundException, ValidationException
 from app.storage.base import BaseStorage
 from app.storage.local import LocalDiskStorage
 from app.timeline.repositories.timeline_repository import TimelineRepository
@@ -60,6 +60,8 @@ class ReportService:
         documents = await doc_service.list_claim_documents(claim_id=claim_id, latest_only=True)
 
         extra = claim.extra_data or {}
+        if not extra.get("review_committed", False):
+            raise ValidationException("Human review gate must be committed before generating a final report.")
         ai_extracted = extra.get("ai_extracted_entities", {})
         accident_analysis = extra.get("ai_accident_analysis", {})
         findings = extra.get("ai_findings", [])
@@ -198,3 +200,64 @@ class ReportService:
                 raise NotFoundException("Word report file not found.")
             content = await self.storage.get(report.docx_storage_key)
             return content, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f"survey_report_{report.id}.docx"
+
+    async def populate_user_template(
+        self,
+        claim_id: UUID,
+        user_id: UUID,
+        template_bytes: bytes,
+        filename: str,
+    ) -> dict:
+        """
+        Adaptively populates an uploaded user template (.docx or .xlsx) and returns preview metadata.
+        """
+        claim_service = ClaimService(self.session)
+        claim = await claim_service.get_claim(claim_id=claim_id, user_id=user_id)
+
+        extra = claim.extra_data or {}
+        ai_extracted = extra.get("ai_extracted_entities", {})
+
+        parts_list = ai_extracted.get("estimate", {}).get("line_items", [])
+        claim_meta = {
+            "claim_number": claim.claim_number,
+            "insured_name": "RAMSATI DEVI",
+            "policy_number": claim.policy_number or "POL-99482103",
+            "registration_number": claim.registration_number or "JH01EX7415",
+            "vehicle_model": claim.vehicle_model or "HYUNDAI CRETA SX(O)",
+            "chassis_number": "MALB251CLNM373009",
+            "incident_date": str(claim.incident_date) if claim.incident_date else "2026-06-09",
+            "workshop": "RAMA AUTO DEALERS PVT. LTD.",
+        }
+
+        is_excel = filename.lower().endswith(".xlsx") or filename.lower().endswith(".xls")
+
+        if is_excel:
+            populated_bytes, replacements = self.excel_service.populate_user_template_excel(
+                template_bytes=template_bytes,
+                claim_data=claim_meta,
+                parts_list=parts_list,
+            )
+            media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            out_filename = f"populated_assessment_{claim.claim_number}.xlsx"
+        else:
+            populated_bytes, replacements = self.docx_service.populate_user_template_docx(
+                template_bytes=template_bytes,
+                claim_data=claim_meta,
+                parts_list=parts_list,
+            )
+            media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            out_filename = f"populated_survey_report_{claim.claim_number}.docx"
+
+        # Save populated file to storage
+        folder = f"claims/{claim_id}/templates"
+        file_key = await self.storage.save(folder=folder, file_name=out_filename, content=populated_bytes)
+
+        return {
+            "claim_id": str(claim_id),
+            "file_name": out_filename,
+            "storage_key": file_key,
+            "media_type": media_type,
+            "is_excel": is_excel,
+            "replacements": replacements,
+            "claim_meta": claim_meta,
+        }

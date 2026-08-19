@@ -192,6 +192,13 @@ class ReviewService:
         """
         claim = await self.claim_service.get_claim(claim_id=claim_id, user_id=user_id)
         extra_data = dict(claim.extra_data or {})
+        ai_findings = extra_data.get("ai_findings", [])
+        reviews_map = extra_data.get("human_reviews", {})
+        pending_ids = [f.get("id") for f in ai_findings if f.get("id") not in reviews_map]
+        if pending_ids:
+            raise ValidationException(
+                f"Every finding needs an explicit approve, reject, or edit decision before commit: {pending_ids}"
+            )
         extra_data["review_committed"] = True
         extra_data["review_committed_at"] = datetime.now(timezone.utc).isoformat()
         extra_data["review_committed_by"] = str(user_id)

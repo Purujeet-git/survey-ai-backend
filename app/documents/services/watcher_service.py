@@ -11,6 +11,9 @@ and records source attribution ('what changed, when, and because of which source
 """
 
 from datetime import datetime, timezone
+import hashlib
+import json
+import re
 import time
 from typing import Any
 from uuid import UUID
@@ -57,7 +60,9 @@ class IncrementalUpdateService:
 
         new_doc_id = new_document.get("id", f"doc-{int(time.time())}")
 
-        # 3. Compute affected vs untouched sections
+        # 3. Compute affected vs untouched sections. Work on a deep copy so a
+        # delta can never mutate an unrelated nested section by reference.
+        before_untouched = self._section_hashes(current_state)
         existing_entities = dict(current_state.get("extracted_entities", {}))
         existing_findings = list(current_state.get("findings", []))
         affected_sections: list[str] = []
@@ -66,6 +71,15 @@ class IncrementalUpdateService:
         # Example: if new document is a Supplemental Repair Estimate
         if doc_type == "REPAIR_ESTIMATE":
             affected_sections.append("extracted_entities.estimate")
+            estimate = dict(existing_entities.get("estimate", {}))
+            line_items = list(estimate.get("line_items", []))
+            amounts = [float(value.replace(",", "")) for value in re.findall(r"INR\s*([0-9,]+(?:\.[0-9]{2})?)", raw_text, re.IGNORECASE)]
+            if amounts:
+                estimate["total_amount"] = max(amounts)
+            if raw_text.strip():
+                line_items.append({"description": file_name, "cost": estimate.get("total_amount", 0.0), "source_document": file_name})
+            estimate["line_items"] = line_items
+            existing_entities["estimate"] = estimate
             # Check if estimate introduces cost variance against policy
             policy_sum_insured = existing_entities.get("policy", {}).get("sum_insured", 0)
             if policy_sum_insured and "total" in raw_text.lower():
@@ -128,6 +142,7 @@ class IncrementalUpdateService:
         updated_state: ClaimState = {
             **current_state,
             "documents": all_docs,
+            "extracted_entities": existing_entities,
             "classification_results": classification_results,
             "findings": existing_findings,
             "execution_logs": [delta_log],
@@ -144,6 +159,23 @@ class IncrementalUpdateService:
             "injection_detected": injection_detected,
             "latency_ms": latency,
             "cost_usd": cost,
+            "untouched_hashes_before": before_untouched,
+            "untouched_hashes_after": self._section_hashes(updated_state),
         }
+        delta_report["untouched_sections_unchanged"] = all(
+            before_untouched.get(name) == delta_report["untouched_hashes_after"].get(name)
+            for name in untouched_sections
+        )
 
         return updated_state, delta_report
+
+    @staticmethod
+    def _section_hashes(state: ClaimState) -> dict[str, str]:
+        sections = ["driver", "vehicle", "fir", "policy", "accident_analysis", "photo_analysis", "expected_damage"]
+        entities = state.get("extracted_entities", {})
+        values = {name: entities.get(name, {}) for name in ["driver", "vehicle", "fir", "policy"]}
+        values.update({name: state.get(name, {}) for name in ["accident_analysis", "photo_analysis", "expected_damage"]})
+        return {
+            name: hashlib.sha256(json.dumps(values[name], sort_keys=True, default=str).encode()).hexdigest()
+            for name in sections
+        }

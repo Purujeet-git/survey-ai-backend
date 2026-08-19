@@ -42,40 +42,32 @@ async def extraction_node(state: ClaimState) -> dict:
         # Extract Driver Details (DL)
         if doc_type == "DRIVING_LICENSE" or "license" in file_name.lower():
             dl_match = re.search(r"\b([A-Z]{2}[0-9]{2,14})\b", text, re.IGNORECASE)
-            entities["driver"]["dl_number"] = dl_match.group(1).upper() if dl_match else "DL-EXTRACTED-9921"
-            entities["driver"]["name"] = "Extracted Driver Name"
-            entities["driver"]["valid_until"] = "2030-12-31"
+            if dl_match:
+                entities["driver"]["dl_number"] = dl_match.group(1).upper()
 
         # Extract Vehicle Details (RC)
         if doc_type == "REGISTRATION_CERTIFICATE" or "rc" in file_name.lower():
             rc_match = re.search(r"\b([A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4})\b", text, re.IGNORECASE)
-            entities["vehicle"]["registration_number"] = rc_match.group(1).upper() if rc_match else "MH02CB1234"
-            entities["vehicle"]["chassis_number"] = "MA3EYD21S00984321"
-            entities["vehicle"]["engine_number"] = "K12M1492042"
+            if rc_match:
+                entities["vehicle"]["registration_number"] = rc_match.group(1).upper()
 
         # Extract FIR Details
         if doc_type == "FIR" or "fir" in file_name.lower():
             fir_match = re.search(r"fir\s*(?:no\.?|number)?\s*:?\s*([0-9/]+)", text, re.IGNORECASE)
-            entities["fir"]["fir_number"] = fir_match.group(1) if fir_match else "FIR-2026-0812"
-            entities["fir"]["police_station"] = "Central Police Station"
-            entities["fir"]["incident_date"] = "2026-08-12"
+            if fir_match:
+                entities["fir"]["fir_number"] = fir_match.group(1)
 
         # Extract Policy Details
         if doc_type == "POLICY_SCHEDULE" or "policy" in file_name.lower():
             pol_match = re.search(r"pol(?:icy)?\s*(?:no\.?|number)?\s*:?\s*([A-Z0-9/-]+)", text, re.IGNORECASE)
-            entities["policy"]["policy_number"] = pol_match.group(1) if pol_match else "POL-99482103"
-            entities["policy"]["sum_insured"] = 750000.0
+            if pol_match:
+                entities["policy"]["policy_number"] = pol_match.group(1)
 
         # Extract Repair Estimate Details
         if doc_type == "REPAIR_ESTIMATE" or "estimate" in file_name.lower():
             amounts = [float(x.replace(",", "")) for x in re.findall(r"INR\s*([0-9,]+(?:\.[0-9]{2})?)", text)]
-            total_amt = max(amounts) if amounts else 45000.0
-            entities["estimate"]["total_amount"] = total_amt
-            entities["estimate"]["line_items"].append({
-                "description": "Front Bumper Assembly",
-                "cost": 18500.0,
-                "type": "REPLACEMENT",
-            })
+            if amounts:
+                entities["estimate"]["total_amount"] = max(amounts)
 
     total_tokens_output = 350
     latency = round((time.time() - start_time) * 1000, 2)

@@ -20,6 +20,7 @@ from app.documents.services.classification_service import DocumentClassification
 from app.documents.services.extraction_service import DocumentExtractionService
 from app.documents.services.metadata_service import DocumentMetadataService
 from app.documents.services.versioning_service import DocumentVersioningService
+from app.ai.security_guardrails import SecurityGuardrails
 from app.shared.exceptions import NotFoundException, ValidationException
 from app.storage.base import BaseStorage
 from app.storage.local import LocalDiskStorage
@@ -91,10 +92,12 @@ class DocumentService:
 
         # Extract text & auto-classify
         extracted_text = self.extraction_service.extract_text(content, content_type)
+        safe_text, injection_detected = SecurityGuardrails.sanitize_untrusted_text(extracted_text)
+        metadata["prompt_injection_detected"] = injection_detected
         classified_type, confidence, _ = self.classification_service.classify(
             file_name=file_name,
             content_type=content_type,
-            text=extracted_text,
+            text=safe_text,
         )
 
         final_type = document_type or classified_type
@@ -174,6 +177,8 @@ class DocumentService:
         metadata = self.metadata_service.extract_metadata(content, content_type)
         file_hash = metadata["hash"]
         extracted_text = self.extraction_service.extract_text(content, content_type)
+        safe_text, injection_detected = SecurityGuardrails.sanitize_untrusted_text(extracted_text)
+        metadata["prompt_injection_detected"] = injection_detected
 
         storage_key = await self.storage.save(
             folder=folder,
@@ -214,7 +219,7 @@ class DocumentService:
         doc_type, confidence, explanation = self.classification_service.classify(
             file_name=doc.file_name,
             content_type=doc.content_type,
-            text=doc.extracted_text,
+            text=SecurityGuardrails.sanitize_untrusted_text(doc.extracted_text or "")[0],
         )
         doc.document_type = doc_type
         doc.classification_confidence = confidence

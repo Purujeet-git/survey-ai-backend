@@ -10,7 +10,7 @@ REST API endpoints for generating survey reports and exporting Excel spreadsheet
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -100,3 +100,24 @@ async def export_report_docx(
         media_type=media_type,
         headers={"Content-Disposition": f"attachment; filename={file_name}"},
     )
+
+
+@router.post(
+    "/{claim_id}/templates/populate",
+    summary="Adaptively populate uploaded Word (.docx) or Excel (.xlsx) survey template with claim facts",
+)
+async def populate_survey_template(
+    claim_id: UUID,
+    template_file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    service: ReportService = Depends(get_report_service),
+):
+    content = await template_file.read()
+    result = await service.populate_user_template(
+        claim_id=claim_id,
+        user_id=current_user.id,
+        template_bytes=content,
+        filename=template_file.filename or "template.docx",
+    )
+    return result
+

@@ -103,6 +103,7 @@ async def process_claim_ai(
         "evidence_validation": final_state.get("evidence_validation"),
         "findings": final_state.get("findings"),
         "execution_logs": final_state.get("execution_logs"),
+        "decision_events": final_state.get("decision_events", []),
     }
 
 
@@ -174,6 +175,7 @@ async def process_claim_ai_stream(
                         "ai_expected_damage": final_state.get("expected_damage", {}),
                         "ai_evidence_validation": final_state.get("evidence_validation", []),
                         "ai_findings": final_state.get("findings", []),
+                        "ai_decision_events": final_state.get("decision_events", []),
                     }
                     await claim_service.update_claim(claim_id=claim.id, user_id=current_user.id, extra_data=claim.extra_data)
 

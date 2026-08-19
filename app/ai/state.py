@@ -121,6 +121,7 @@ class ClaimState(TypedDict, total=False):
     expected_damage: ExpectedDamageResult
     evidence_validation: list[ValidationItem]
     findings: list[FindingItem]
+    decision_events: Annotated[list[dict[str, Any]], operator.add]
     
     # Audit & Monitoring
     execution_logs: Annotated[list[ExecutionLogItem], operator.add]

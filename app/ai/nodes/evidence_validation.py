@@ -29,16 +29,28 @@ async def evidence_validation_node(state: ClaimState) -> dict:
 
     validations: list[ValidationItem] = []
 
-    # If no line items present from estimate doc, synthesize default check
-    items_to_validate = line_items or [
-        {"description": "Front Bumper Assembly", "cost": 18500.0, "type": "REPLACEMENT"},
-        {"description": "Rear Bumper Assembly", "cost": 14000.0, "type": "REPLACEMENT"},
-    ]
+    # Never invent estimate items. An empty source estimate is an empty
+    # validation result, not permission to manufacture a demo line item.
+    items_to_validate = line_items
 
     for item in items_to_validate:
         desc = item.get("description", "")
         cost = item.get("cost", 0.0)
         desc_lower = desc.lower()
+
+        if not desc:
+            continue
+
+        # Without photo evidence we cannot support or reject a repair claim.
+        if not detected_names:
+            validations.append({
+                "estimate_item": desc,
+                "claimed_cost": cost,
+                "status": "MANUAL_REVIEW",
+                "confidence": 0.0,
+                "reason": "No photo evidence was supplied; the item cannot be validated automatically.",
+            })
+            continue
 
         # Check if part matches detected photos
         is_in_photos = any(name in desc_lower or desc_lower in name for name in detected_names)

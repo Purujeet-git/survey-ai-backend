@@ -8,7 +8,7 @@ Purpose:
 Defines request and response schemas for authentication.
 """
 
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class LoginRequest(BaseModel):
@@ -18,6 +18,13 @@ class LoginRequest(BaseModel):
 
     email: EmailStr
     password: str
+
+
+class LoginOrRegisterRequest(BaseModel):
+    """Credentials used by the first-time sign-in flow."""
+
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
 
 
 class RefreshRequest(BaseModel):
@@ -39,3 +46,9 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int
+
+
+class LoginOrRegisterResponse(TokenResponse):
+    """Tokens plus whether a new account was created for this sign-in."""
+
+    is_new_user: bool = False

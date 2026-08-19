@@ -41,8 +41,8 @@ async def conflict_detection_node(state: ClaimState) -> dict:
 
     # 2. Check for Policy vs Incident Date consistency
     fir_date = fir.get("incident_date")
-    policy_expiry = "2026-12-31"  # Simulated coverage check
-    if fir_date and fir_date > policy_expiry:
+    policy_expiry = policy.get("expiry_date")
+    if fir_date and policy_expiry and fir_date > policy_expiry:
         findings.append({
             "id": str(uuid4()),
             "title": "Incident Date Outside Policy Coverage",
@@ -53,9 +53,9 @@ async def conflict_detection_node(state: ClaimState) -> dict:
         })
 
     # 3. Check for Total Estimate Cost Overrun vs Sum Insured
-    sum_insured = policy.get("sum_insured", 750000.0)
+    sum_insured = policy.get("sum_insured")
     total_estimate = extracted.get("estimate", {}).get("total_amount", 0.0)
-    if total_estimate > sum_insured:
+    if sum_insured is not None and total_estimate and total_estimate > sum_insured:
         findings.append({
             "id": str(uuid4()),
             "title": "Estimate Amount Exceeds Sum Insured",
