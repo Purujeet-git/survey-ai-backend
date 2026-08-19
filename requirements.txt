@@ -21,9 +21,11 @@ pytest-asyncio
 email-validator
 
 PyJWT
+pwdlib[argon2]>=0.3,<0.4
 piexif
 Pillow
 openpyxl
 python-docx
+pypdf>=5,<6
 langgraph
 langchain
