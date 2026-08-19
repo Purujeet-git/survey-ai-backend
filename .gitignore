@@ -49,5 +49,9 @@ generated_reports/
 # MinIO Local Storage
 storage/
 
+# Application storage adapters are source code, not runtime storage.
+!app/storage/
+!app/storage/*.py
+
 # IDE
 .idea/

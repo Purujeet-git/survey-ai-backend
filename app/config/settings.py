@@ -46,6 +46,16 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str | None = None
     FRONTEND_URL: str = "http://localhost:3000"
 
+    def model_post_init(self, __context) -> None:
+        """Use the psycopg 3 driver for both async SQLAlchemy and Alembic."""
+
+        if self.DATABASE_URL.startswith("postgresql://"):
+            self.DATABASE_URL = self.DATABASE_URL.replace(
+                "postgresql://",
+                "postgresql+psycopg://",
+                1,
+            )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=True,
