@@ -21,6 +21,17 @@ class DocumentItem(TypedDict, total=False):
     file_size: int
     extracted_text: str
     doc_metadata: dict[str, Any]
+    vision_analysis: dict[str, Any]
+
+
+class SourceCitation(TypedDict, total=False):
+    document_id: str
+    file_name: str
+    page: int | None
+    section: str | None
+    quote: str
+    start_offset: int | None
+    end_offset: int | None
 
 
 class ExtractedEntities(TypedDict, total=False):
@@ -32,12 +43,14 @@ class ExtractedEntities(TypedDict, total=False):
 
 
 class AccidentAnalysis(TypedDict, total=False):
+    status: str  # GROUNDED, INSUFFICIENT_EVIDENCE
     collision_type: str
     impact_direction: str
     estimated_severity: str
     speed_estimate: str
     cause_summary: str
     consistency_analysis: str
+    citations: list[SourceCitation]
 
 
 class DamagedPart(TypedDict, total=False):
@@ -66,6 +79,7 @@ class ValidationItem(TypedDict, total=False):
     status: str  # SUPPORTED, UNSUPPORTED, MANUAL_REVIEW
     confidence: float
     reason: str
+    citations: list[SourceCitation]
 
 
 class FindingItem(TypedDict, total=False):
@@ -75,6 +89,7 @@ class FindingItem(TypedDict, total=False):
     severity: str  # LOW, MEDIUM, HIGH, CRITICAL
     description: str
     recommendation: str
+    citations: list[SourceCitation]
 
 
 class ExecutionLogItem(TypedDict, total=False):
@@ -104,6 +119,8 @@ class ClaimState(TypedDict, total=False):
     """
 
     claim_id: str
+    run_id: str
+    input_fingerprint: str
     claim_number: str
     organization_id: str | None
     user_id: str

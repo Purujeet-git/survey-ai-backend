@@ -66,33 +66,20 @@ class ReportService:
         accident_analysis = extra.get("ai_accident_analysis", {})
         findings = extra.get("ai_findings", [])
 
-        # Default fallback parts extracted from invoice (matching Hyundai invoice schema)
         parts_list = ai_extracted.get("estimate", {}).get("line_items", [])
-        if not parts_list:
-            parts_list = [
-                {"part_code": "86551K6000", "description": "BRACKET-FR BUMPER SIDE LH", "hsn": "87089900", "qty": 1, "rate": 111.02, "tax": 0.18, "claimed": 111.02, "assessed": 111.02, "depr": 0.50},
-                {"part_code": "86511K6000", "description": "COVER-FR BUMPER", "hsn": "87089900", "qty": 1, "rate": 1483.90, "tax": 0.18, "claimed": 1483.90, "assessed": 1483.90, "depr": 0.50},
-                {"part_code": "86300K6010", "description": "EMBLEM-SYMBOL MARK", "hsn": "87089900", "qty": 1, "rate": 613.56, "tax": 0.18, "claimed": 613.56, "assessed": 613.56, "depr": 0.00},
-                {"part_code": "83404C4010", "description": "REGULATOR ASSY-RR DR WDO RH", "hsn": "87089900", "qty": 1, "rate": 753.38, "tax": 0.18, "claimed": 753.38, "assessed": 753.38, "depr": 0.00},
-            ]
-
-        labor_list = [
-            {"code": "A10AARER27LNA", "description": "Rear Door denting/repair RH", "hsn": "998729", "tax": 0.18, "claimed": 500.0, "assessed": 500.0},
-            {"code": "A10AARFBPF07R", "description": "COVER- FR BUMPER R & R", "hsn": "998729", "tax": 0.18, "claimed": 451.0, "assessed": 451.0},
-            {"code": "A10AAWBBPF13FH", "description": "FR Bumper (Water Borne Paint)", "hsn": "998729", "tax": 0.18, "claimed": 5687.0, "assessed": 5687.0},
-        ]
+        labor_list = extra.get("ai_labor_items", [])
 
         claim_meta = {
             "claim_number": claim.claim_number,
-            "insured_name": "RAMSATI DEVI",
-            "policy_number": "POL-99482103",
-            "registration_number": "JH01EX7415",
-            "vehicle_model": "HYUNDAI CRETA",
-            "chassis_number": "MALB251CLNM373009",
-            "incident_date": "2026-06-09",
-            "workshop": "RAMA AUTO DEALERS PVT. LTD.",
-            "surveyor_name": "Official Insurance Surveyor",
-            "accident_narrative": accident_analysis.get("consistency_analysis", "Frontal collision impact."),
+            "insured_name": claim.owner_name,
+            "policy_number": claim.policy_number,
+            "registration_number": claim.registration_number,
+            "vehicle_model": extra.get("vehicle_model"),
+            "chassis_number": claim.chassis_number,
+            "incident_date": extra.get("incident_date"),
+            "workshop": extra.get("workshop"),
+            "surveyor_name": extra.get("surveyor_name"),
+            "accident_narrative": accident_analysis.get("consistency_analysis", "Insufficient source evidence for an accident narrative."),
         }
 
         # 1. Generate Excel Assessment Spreadsheet

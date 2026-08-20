@@ -10,7 +10,7 @@ LLM agent node synthesizing accident cause, collision mechanics, impact directio
 
 from datetime import datetime, timezone
 import time
-from app.ai.state import AccidentAnalysis, ClaimState, ExecutionLogItem
+from app.ai.state import AccidentAnalysis, ClaimState, ExecutionLogItem, SourceCitation
 
 
 async def accident_understanding_node(state: ClaimState) -> dict:
@@ -31,6 +31,48 @@ async def accident_understanding_node(state: ClaimState) -> dict:
             cause_sources.append(txt)
 
     combined_cause = " ".join(cause_sources)
+
+    citations: list[SourceCitation] = []
+    for doc in documents:
+        text = doc.get("extracted_text", "") or ""
+        if text and ("accident" in text.lower() or "collision" in text.lower() or "hit" in text.lower()):
+            metadata = doc.get("doc_metadata", {}) or {}
+            citations.append({
+                "document_id": doc.get("id", ""),
+                "file_name": doc.get("file_name", ""),
+                "page": metadata.get("page_number", metadata.get("page")),
+                "section": metadata.get("section"),
+                "quote": text[:1000],
+                "start_offset": 0,
+                "end_offset": min(len(text), 1000),
+            })
+
+    if not combined_cause:
+        accident_analysis: AccidentAnalysis = {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "collision_type": "UNKNOWN",
+            "impact_direction": "UNKNOWN",
+            "estimated_severity": "UNKNOWN",
+            "speed_estimate": "UNKNOWN",
+            "cause_summary": "Insufficient source evidence to determine accident dynamics.",
+            "consistency_analysis": "No source document states the collision type, impact direction, speed, or severity.",
+            "citations": [],
+        }
+        latency = round((time.time() - start_time) * 1000, 2)
+        log_entry: ExecutionLogItem = {
+            "node": "AccidentUnderstandingNode",
+            "status": "NO_EVIDENCE",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "latency_ms": latency,
+            "token_usage": {"input": 0, "output": 0},
+            "details": "Accident dynamics were not inferred because supporting source evidence was absent.",
+        }
+        return {
+            "accident_analysis": accident_analysis,
+            "status": "accident_analysis_insufficient_evidence",
+            "current_node": "AccidentUnderstandingNode",
+            "execution_logs": [log_entry],
+        }
 
     # Classify collision dynamics
     if "rear" in combined_cause.lower() or "behind" in combined_cause.lower():
@@ -56,12 +98,14 @@ async def accident_understanding_node(state: ClaimState) -> dict:
     )
 
     accident_analysis: AccidentAnalysis = {
+        "status": "GROUNDED",
         "collision_type": collision_type,
         "impact_direction": impact_direction,
         "estimated_severity": severity,
         "speed_estimate": speed_estimate,
         "cause_summary": combined_cause or "Frontal collision during vehicle maneuver.",
         "consistency_analysis": narrative,
+        "citations": citations,
     }
 
     latency = round((time.time() - start_time) * 1000, 2)

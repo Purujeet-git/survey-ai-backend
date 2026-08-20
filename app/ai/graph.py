@@ -21,8 +21,11 @@ from app.ai.nodes.intake import intake_node
 from app.ai.nodes.photo_analysis import photo_analysis_node
 from app.ai.state import ClaimState, compute_token_cost
 from app.ai.security_guardrails import SecurityGuardrails
+from app.ai.coordination import claim_lock
 from copy import deepcopy
 from datetime import datetime, timezone
+import hashlib
+import json
 import time
 
 
@@ -154,6 +157,21 @@ class ClaimAIPipelineService:
         self.graph = build_claim_processing_graph()
 
     @staticmethod
+    def _input_fingerprint(state: ClaimState) -> str:
+        """Hash the source manifest so identical runs can be recognized safely."""
+        manifest = []
+        for document in state.get("documents", []):
+            manifest.append({
+                "id": document.get("id"),
+                "file_name": document.get("file_name"),
+                "document_type": document.get("document_type"),
+                "content_type": document.get("content_type"),
+                "extracted_text": document.get("extracted_text", ""),
+            })
+        payload = json.dumps(manifest, sort_keys=True, ensure_ascii=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
     def _prepare_untrusted_documents(state: ClaimState) -> ClaimState:
         """Create the agent view of documents without mutating stored originals."""
         prepared = deepcopy(dict(state))
@@ -197,24 +215,49 @@ class ClaimAIPipelineService:
         Execute or resume the graph pipeline for a claim.
         """
         claim_id = initial_state.get("claim_id", "")
-        existing_checkpoint = global_checkpointer.load_checkpoint(claim_id)
+        input_fingerprint = self._input_fingerprint(initial_state)
+        async with claim_lock(claim_id):
+            existing_checkpoint = global_checkpointer.load_checkpoint(claim_id)
+            if (
+                existing_checkpoint
+                and existing_checkpoint.get("input_fingerprint") == input_fingerprint
+                and existing_checkpoint.get("current_node") in {"ConflictDetectionNode", "HumanEscalationNode"}
+            ):
+                return existing_checkpoint
 
-        current_state = self._prepare_untrusted_documents(existing_checkpoint or initial_state)
-
-        result_state = await self.graph.ainvoke(current_state)
-
-        # Save latest checkpoint
-        global_checkpointer.save_checkpoint(claim_id, result_state)
-
-        return result_state
+            source_state = deepcopy(existing_checkpoint or initial_state)
+            source_state["input_fingerprint"] = input_fingerprint
+            current_state = self._prepare_untrusted_documents(source_state)
+            result_state = await self.graph.ainvoke(current_state)
+            result_state["input_fingerprint"] = input_fingerprint
+            global_checkpointer.save_checkpoint(claim_id, result_state)
+            return result_state
 
     async def astream_pipeline(self, initial_state: ClaimState):
         """
         Stream stage-by-stage node execution events for real-time UI visualization.
         """
         claim_id = initial_state.get("claim_id", "")
-        existing_checkpoint = global_checkpointer.load_checkpoint(claim_id)
-        current_state = self._prepare_untrusted_documents(existing_checkpoint or initial_state)
+        input_fingerprint = self._input_fingerprint(initial_state)
+        async with claim_lock(claim_id):
+            existing_checkpoint = global_checkpointer.load_checkpoint(claim_id)
+            if (
+                existing_checkpoint
+                and existing_checkpoint.get("input_fingerprint") == input_fingerprint
+                and existing_checkpoint.get("current_node") in {"ConflictDetectionNode", "HumanEscalationNode"}
+            ):
+                yield {
+                    "event": "PIPELINE_FINISHED",
+                    "claim_id": claim_id,
+                    "status": existing_checkpoint.get("status"),
+                    "final_state": existing_checkpoint,
+                    "idempotent": True,
+                }
+                return
+
+            source_state = deepcopy(existing_checkpoint or initial_state)
+            source_state["input_fingerprint"] = input_fingerprint
+            current_state = self._prepare_untrusted_documents(source_state)
 
         yield {
             "event": "PIPELINE_STARTED",

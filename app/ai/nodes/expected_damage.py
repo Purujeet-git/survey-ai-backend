@@ -20,11 +20,28 @@ async def expected_damage_node(state: ClaimState) -> dict:
     start_time = time.time()
     
     accident = state.get("accident_analysis", {})
-    impact = accident.get("impact_direction", "Front").lower()
-    collision_type = accident.get("collision_type", "Frontal Impact")
+    impact = accident.get("impact_direction", "UNKNOWN").lower()
+    collision_type = accident.get("collision_type", "UNKNOWN")
 
     expected_zones = []
     expected_components = []
+
+    if accident.get("status") != "GROUNDED" or impact == "unknown":
+        result: ExpectedDamageResult = {
+            "expected_zones": [],
+            "expected_components": [],
+            "confidence": 0.0,
+        }
+        latency = round((time.time() - start_time) * 1000, 2)
+        log_entry: ExecutionLogItem = {
+            "node": "ExpectedDamageNode",
+            "status": "NO_EVIDENCE",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "latency_ms": latency,
+            "token_usage": {"input": 0, "output": 0},
+            "details": "Expected damage was not inferred without grounded accident dynamics.",
+        }
+        return {"expected_damage": result, "status": "expected_damage_insufficient_evidence", "current_node": "ExpectedDamageNode", "execution_logs": [log_entry]}
 
     if "front" in impact:
         expected_zones = ["Frontal Crumple Zone", "Engine Compartment", "Front Lighting System"]

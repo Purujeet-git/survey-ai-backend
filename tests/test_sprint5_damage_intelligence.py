@@ -24,7 +24,7 @@ async def test_photo_analysis_node():
     state: ClaimState = {
         "accident_analysis": {"impact_direction": "Front", "estimated_severity": "Severe"},
         "documents": [
-            {"id": "doc1", "document_type": "ACCIDENT_PHOTO", "file_name": "front_damage.jpg"}
+            {"id": "doc1", "document_type": "ACCIDENT_PHOTO", "file_name": "front_damage.jpg", "doc_metadata": {"vision_analysis": {"detected_parts": [{"part_name": "Front Bumper", "severity": "Severe", "recommended_action": "REPLACE"}]}}}
         ],
     }
 
@@ -40,6 +40,7 @@ async def test_photo_analysis_node():
 async def test_expected_damage_node():
     state: ClaimState = {
         "accident_analysis": {
+            "status": "GROUNDED",
             "impact_direction": "Front",
             "collision_type": "Frontal Impact",
         }
@@ -84,6 +85,42 @@ async def test_evidence_validation_node():
 
 
 @pytest.mark.asyncio
+async def test_evidence_validation_never_invents_missing_estimate_items():
+    result = await evidence_validation_node({"extracted_entities": {"estimate": {"line_items": []}}, "photo_analysis": {"detected_parts": []}})
+    assert result["evidence_validation"] == []
+
+
+@pytest.mark.asyncio
+async def test_photo_analysis_never_invents_damage_without_photos():
+    result = await photo_analysis_node({"documents": [], "accident_analysis": {"impact_direction": "Front"}})
+    assert result["photo_analysis"]["photo_count"] == 0
+    assert result["photo_analysis"]["detected_parts"] == []
+
+
+@pytest.mark.asyncio
+async def test_accident_analysis_does_not_invent_missing_dynamics():
+    from app.ai.nodes.accident import accident_understanding_node
+
+    result = await accident_understanding_node({"documents": [], "extracted_entities": {}})
+    analysis = result["accident_analysis"]
+
+    assert analysis["status"] == "INSUFFICIENT_EVIDENCE"
+    assert analysis["collision_type"] == "UNKNOWN"
+    assert analysis["impact_direction"] == "UNKNOWN"
+    assert analysis["speed_estimate"] == "UNKNOWN"
+    assert analysis["citations"] == []
+
+
+@pytest.mark.asyncio
+async def test_expected_damage_does_not_infer_from_ungrounded_direction():
+    result = await expected_damage_node({"accident_analysis": {"impact_direction": "Front"}})
+
+    assert result["expected_damage"]["expected_zones"] == []
+    assert result["expected_damage"]["expected_components"] == []
+    assert result["expected_damage"]["confidence"] == 0.0
+
+
+@pytest.mark.asyncio
 async def test_conflict_detection_node():
     state: ClaimState = {
         "evidence_validation": [
@@ -108,6 +145,46 @@ async def test_conflict_detection_node():
     types = [f["finding_type"] for f in findings]
     assert "UNSUPPORTED_REPAIR" in types
     assert "COST_OVERRUN" in types
+
+
+@pytest.mark.asyncio
+async def test_policy_and_cost_findings_include_source_citations():
+    result = await conflict_detection_node({
+        "documents": [
+            {
+                "id": "fir-1",
+                "file_name": "incident_fir.pdf",
+                "document_type": "FIR",
+                "extracted_text": "Incident date: 2026-08-12",
+            },
+            {
+                "id": "policy-1",
+                "file_name": "policy_schedule.pdf",
+                "document_type": "POLICY_SCHEDULE",
+                "extracted_text": "Policy expiry: 2026-08-01; Sum insured: INR 500000",
+            },
+            {
+                "id": "estimate-1",
+                "file_name": "repair_estimate.pdf",
+                "document_type": "REPAIR_ESTIMATE",
+                "extracted_text": "Total estimate: INR 650000",
+            },
+        ],
+        "extracted_entities": {
+            "fir": {"incident_date": "2026-08-12"},
+            "policy": {"expiry_date": "2026-08-01", "sum_insured": 500000.0},
+            "estimate": {"total_amount": 650000.0},
+        },
+        "evidence_validation": [],
+    })
+
+    findings = {finding["finding_type"]: finding for finding in result["findings"]}
+    date_citations = findings["DATE_MISMATCH"]["citations"]
+    cost_citations = findings["COST_OVERRUN"]["citations"]
+
+    assert {citation["document_id"] for citation in date_citations} == {"fir-1", "policy-1"}
+    assert {citation["document_id"] for citation in cost_citations} == {"estimate-1", "policy-1"}
+    assert all(citation["quote"] for citation in date_citations + cost_citations)
 
 
 @pytest.mark.asyncio

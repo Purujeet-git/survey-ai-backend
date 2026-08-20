@@ -10,7 +10,7 @@ Cross-validation agent matching garage estimate line items against photo evidenc
 
 from datetime import datetime, timezone
 import time
-from app.ai.state import ClaimState, ExecutionLogItem, ValidationItem
+from app.ai.state import ClaimState, ExecutionLogItem, SourceCitation, ValidationItem
 
 
 async def evidence_validation_node(state: ClaimState) -> dict:
@@ -26,6 +26,21 @@ async def evidence_validation_node(state: ClaimState) -> dict:
     photo_res = state.get("photo_analysis", {})
     detected_parts = photo_res.get("detected_parts", [])
     detected_names = [p.get("part_name", "").lower() for p in detected_parts]
+
+    estimate_citations: list[SourceCitation] = []
+    for doc in state.get("documents", []):
+        if doc.get("document_type") == "REPAIR_ESTIMATE" or "estimate" in doc.get("file_name", "").lower():
+            text = doc.get("extracted_text", "") or ""
+            metadata = doc.get("doc_metadata", {}) or {}
+            estimate_citations.append({
+                "document_id": doc.get("id", ""),
+                "file_name": doc.get("file_name", ""),
+                "page": metadata.get("page_number", metadata.get("page")),
+                "section": metadata.get("section", "Repair Estimate"),
+                "quote": text[:1000],
+                "start_offset": 0,
+                "end_offset": min(len(text), 1000),
+            })
 
     validations: list[ValidationItem] = []
 
@@ -49,6 +64,7 @@ async def evidence_validation_node(state: ClaimState) -> dict:
                 "status": "MANUAL_REVIEW",
                 "confidence": 0.0,
                 "reason": "No photo evidence was supplied; the item cannot be validated automatically.",
+                "citations": estimate_citations,
             })
             continue
 
@@ -74,6 +90,7 @@ async def evidence_validation_node(state: ClaimState) -> dict:
             "status": status,
             "confidence": conf,
             "reason": reason,
+            "citations": estimate_citations,
         })
 
     latency = round((time.time() - start_time) * 1000, 2)

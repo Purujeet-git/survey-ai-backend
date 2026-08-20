@@ -48,6 +48,23 @@ class IncrementalUpdateService:
         content_type = new_document.get("content_type", "")
         raw_text = new_document.get("extracted_text", "")
 
+        new_fingerprint = self._document_fingerprint(new_document)
+        new_document_id = new_document.get("id")
+        for existing_document in current_state.get("documents", []):
+            same_document_id = new_document_id and existing_document.get("id") == new_document_id
+            if same_document_id or self._document_fingerprint(existing_document) == new_fingerprint:
+                return current_state, {
+                    "source_document": file_name,
+                    "status": "IDEMPOTENT_NOOP",
+                    "duplicate": True,
+                    "affected_sections": [],
+                    "untouched_sections": [],
+                    "new_conflicts_surfaced": [],
+                    "latency_ms": 0.0,
+                    "cost_usd": 0.0,
+                    "untouched_sections_unchanged": True,
+                }
+
         # 1. Sanitize text with Prompt Injection Defense Guardrails
         sanitized_text, injection_detected = SecurityGuardrails.sanitize_untrusted_text(raw_text)
 
@@ -85,7 +102,7 @@ class IncrementalUpdateService:
             if policy_sum_insured and "total" in raw_text.lower():
                 # Detect potential conflict/overrun
                 new_finding = {
-                    "id": f"find-inc-{int(time.time())}",
+                    "id": f"find-inc-{new_fingerprint[:16]}",
                     "title": f"Incremental Conflict from {file_name}",
                     "finding_type": "SUPPLEMENTAL_ESTIMATE_FLAG",
                     "severity": "MEDIUM",
@@ -152,6 +169,7 @@ class IncrementalUpdateService:
 
         delta_report = {
             "source_document": file_name,
+            "status": "SUCCESS",
             "arrived_at": delta_log["timestamp"],
             "affected_sections": affected_sections,
             "untouched_sections": untouched_sections,
@@ -168,6 +186,16 @@ class IncrementalUpdateService:
         )
 
         return updated_state, delta_report
+
+    @staticmethod
+    def _document_fingerprint(document: DocumentItem) -> str:
+        payload = json.dumps({
+            "id": document.get("id"),
+            "file_name": document.get("file_name"),
+            "content_type": document.get("content_type"),
+            "extracted_text": document.get("extracted_text", ""),
+        }, sort_keys=True, ensure_ascii=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _section_hashes(state: ClaimState) -> dict[str, str]:

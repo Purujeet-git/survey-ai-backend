@@ -375,7 +375,7 @@ class SurveyAIMCPServer:
 
     async def handle_tool_call_async(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         claim_id = arguments.get("claim_id", arguments.get("claim_number", "default-claim"))
-        if tool_name == "pipeline_run":
+        if tool_name in {"pipeline_run", "incremental_ingest"}:
             async with self._claim_lock(str(claim_id)):
                 with self._lock:
                     self.claims_store = self._load_store()
