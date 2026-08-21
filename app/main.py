@@ -17,6 +17,7 @@ from app.config.logging import configure_logging
 from app.shared.exceptions import SurveyAIException
 from app.shared.exceptions.handlers import survey_ai_exception_handler
 from app.shared.middleware.request_id import RequestIDMiddleware
+from app.documents.services.watcher_service import WatcherManager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -24,9 +25,11 @@ async def lifespan(app: FastAPI):
 
     logger = logging.getLogger(__name__)
     logger.info("Starting SurveyAI Backend...")
+    app.state.watcher_manager = WatcherManager()
 
     yield
 
+    await app.state.watcher_manager.stop_all()
     logger.info("Stopping SurveyAI Backend...")
 
 

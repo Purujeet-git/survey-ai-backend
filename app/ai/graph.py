@@ -24,9 +24,23 @@ from app.ai.security_guardrails import SecurityGuardrails
 from app.ai.coordination import claim_lock
 from copy import deepcopy
 from datetime import datetime, timezone
+import asyncio
 import hashlib
 import json
 import time
+
+
+MAX_NODE_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = 0.05
+
+
+class PipelineStageFailure(Exception):
+    """Signals that a stage exhausted its persisted retry budget."""
+
+    def __init__(self, node_name: str, message: str) -> None:
+        super().__init__(message)
+        self.node_name = node_name
+        self.message = message
 
 
 def build_claim_processing_graph():
@@ -83,24 +97,68 @@ def build_claim_processing_graph():
 
     def make_checkpointed_node(node_name, node_fn):
         async def checkpointed_node(state):
-            result = await node_fn(state)
-            result = deepcopy(result)
-            for log in result.get("execution_logs", []):
-                tokens = log.get("token_usage", {}) or {}
-                if "cost_usd" not in log:
-                    log["cost_usd"] = compute_token_cost(
-                        int(tokens.get("input", 0) or 0),
-                        int(tokens.get("output", 0) or 0),
-                    )
-            merged = deepcopy(dict(state))
-            for key, value in result.items():
-                if key == "execution_logs":
-                    merged[key] = list(state.get(key, [])) + list(value or [])
-                else:
-                    merged[key] = value
-            merged["current_node"] = node_name
-            global_checkpointer.save_checkpoint(state.get("claim_id", ""), merged)
-            return result
+            claim_id = state.get("claim_id", "")
+            attempts = dict(state.get("node_attempts", {}))
+            last_error = ""
+
+            for attempt in range(attempts.get(node_name, 0) + 1, MAX_NODE_ATTEMPTS + 1):
+                attempts[node_name] = attempt
+                running_state = deepcopy(dict(state))
+                running_state.update({
+                    "current_node": node_name,
+                    "status": "retrying" if attempt > 1 else "in_progress",
+                    "node_attempts": attempts,
+                    "last_error": last_error,
+                })
+                global_checkpointer.save_checkpoint(claim_id, running_state)
+
+                try:
+                    result = deepcopy(await node_fn(running_state))
+                    for log in result.get("execution_logs", []):
+                        tokens = log.get("token_usage", {}) or {}
+                        if "cost_usd" not in log:
+                            log["cost_usd"] = compute_token_cost(
+                                int(tokens.get("input", 0) or 0),
+                                int(tokens.get("output", 0) or 0),
+                            )
+                    merged = deepcopy(dict(running_state))
+                    for key, value in result.items():
+                        if key == "execution_logs":
+                            merged[key] = list(running_state.get(key, [])) + list(value or [])
+                        else:
+                            merged[key] = value
+                    merged["current_node"] = node_name
+                    merged["node_attempts"] = attempts
+                    merged["last_error"] = ""
+                    global_checkpointer.save_checkpoint(claim_id, merged)
+                    result["node_attempts"] = attempts
+                    result["last_error"] = ""
+                    return result
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}" or type(exc).__name__
+                    failure_state = deepcopy(running_state)
+                    failure_state.update({
+                        "failed_node": node_name,
+                        "last_error": last_error,
+                        "failure_reason": "retry_exhausted" if attempt >= MAX_NODE_ATTEMPTS else "retrying",
+                        "execution_logs": list(running_state.get("execution_logs", [])) + [{
+                            "node": node_name,
+                            "status": "RETRYING" if attempt < MAX_NODE_ATTEMPTS else "FAILED",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "latency_ms": 0.0,
+                            "token_usage": {"input": 0, "output": 0},
+                            "cost_usd": 0.0,
+                            "details": f"Attempt {attempt}/{MAX_NODE_ATTEMPTS} failed: {last_error}",
+                        }],
+                    })
+                    global_checkpointer.save_checkpoint(claim_id, failure_state)
+                    if attempt >= MAX_NODE_ATTEMPTS:
+                        failure_state["status"] = "failed_terminal"
+                        global_checkpointer.save_checkpoint(claim_id, failure_state)
+                        raise PipelineStageFailure(node_name, last_error) from exc
+                    await asyncio.sleep(RETRY_BACKOFF_SECONDS * attempt)
+
+            raise PipelineStageFailure(node_name, last_error)
         return checkpointed_node
 
     for node_name, node_fn in nodes.items():
@@ -117,6 +175,10 @@ def build_claim_processing_graph():
 
     def route_after_resume(state):
         """Enter immediately after the last durable checkpointed stage."""
+        if state.get("status") == "failed_terminal":
+            return END
+        if state.get("status") in {"in_progress", "retrying"} and state.get("current_node") not in {"", "START"}:
+            return state.get("current_node")
         next_nodes = {
             "START": "IntakeNode",
             "": "IntakeNode",
@@ -228,7 +290,10 @@ class ClaimAIPipelineService:
             source_state = deepcopy(existing_checkpoint or initial_state)
             source_state["input_fingerprint"] = input_fingerprint
             current_state = self._prepare_untrusted_documents(source_state)
-            result_state = await self.graph.ainvoke(current_state)
+            try:
+                result_state = await self.graph.ainvoke(current_state)
+            except PipelineStageFailure:
+                return global_checkpointer.load_checkpoint(claim_id) or current_state
             result_state["input_fingerprint"] = input_fingerprint
             global_checkpointer.save_checkpoint(claim_id, result_state)
             return result_state
@@ -270,28 +335,40 @@ class ClaimAIPipelineService:
 
         running_state = dict(current_state)
 
-        async for node_output in self.graph.astream(current_state):
-            for node_name, node_state_diff in node_output.items():
-                running_state.update(node_state_diff)
-                decision = self._decision_for(node_name, running_state)
-                running_state.setdefault("decision_events", []).append(decision)
-                global_checkpointer.save_checkpoint(claim_id, running_state)
+        try:
+            async for node_output in self.graph.astream(current_state):
+                for node_name, node_state_diff in node_output.items():
+                    running_state.update(node_state_diff)
+                    decision = self._decision_for(node_name, running_state)
+                    running_state.setdefault("decision_events", []).append(decision)
+                    global_checkpointer.save_checkpoint(claim_id, running_state)
 
-                yield {
-                    "event": "NODE_COMPLETED",
-                    "node": node_name,
-                    "claim_id": claim_id,
-                    "status": running_state.get("status"),
-                    "current_node": node_name,
-                    "state_diff": node_state_diff,
-                    "execution_logs": running_state.get("execution_logs", [])[-1:] if running_state.get("execution_logs") else [],
-                }
-                yield {
-                    "event": "DECISION_MADE",
-                    "node": node_name,
-                    "claim_id": claim_id,
-                    "decision": decision,
-                }
+                    yield {
+                        "event": "NODE_COMPLETED",
+                        "node": node_name,
+                        "claim_id": claim_id,
+                        "status": running_state.get("status"),
+                        "current_node": node_name,
+                        "state_diff": node_state_diff,
+                        "execution_logs": running_state.get("execution_logs", [])[-1:] if running_state.get("execution_logs") else [],
+                    }
+                    yield {
+                        "event": "DECISION_MADE",
+                        "node": node_name,
+                        "claim_id": claim_id,
+                        "decision": decision,
+                    }
+        except PipelineStageFailure as exc:
+            failure_state = global_checkpointer.load_checkpoint(claim_id) or running_state
+            yield {
+                "event": "PIPELINE_FAILED",
+                "claim_id": claim_id,
+                "status": failure_state.get("status", "failed_terminal"),
+                "failed_node": exc.node_name,
+                "error": failure_state.get("last_error", exc.message),
+                "final_state": failure_state,
+            }
+            return
 
         yield {
             "event": "PIPELINE_FINISHED",

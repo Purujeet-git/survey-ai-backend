@@ -14,6 +14,7 @@ import json
 import sys
 import os
 import time
+import re
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from threading import RLock
@@ -25,6 +26,10 @@ from app.ai.graph import ClaimAIPipelineService
 from app.documents.services.watcher_service import IncrementalUpdateService
 from app.reports.services.excel_service import ExcelAssessmentService
 from app.reports.services.docx_service import WordReportService
+
+
+class MCPClientError(ValueError):
+    """A client supplied invalid MCP tool input."""
 
 
 class SurveyAIMCPServer:
@@ -130,6 +135,7 @@ class SurveyAIMCPServer:
                     "claim_id": {"type": "string", "description": "Target claim UUID"},
                     "file_name": {"type": "string", "description": "New document filename"},
                     "extracted_text": {"type": "string", "description": "Document text content"},
+                    "content_type": {"type": "string", "description": "Optional MIME type"},
                 },
                 "required": ["claim_id", "file_name"],
             },
@@ -212,17 +218,52 @@ class SurveyAIMCPServer:
         Synchronous adapter used by scripts and offline tests. The stdio server
         awaits the same real async handlers directly.
         """
-        if tool_name in {"pipeline_run", "report_export", "incremental_ingest"}:
-            return asyncio.run(self.handle_tool_call_async(tool_name, arguments))
+        return asyncio.run(self.handle_tool_call_async(tool_name, arguments))
+
+    @staticmethod
+    def _validate_arguments(tool_name: str, arguments: dict[str, Any]) -> None:
+        if tool_name not in {tool["name"] for tool in SurveyAIMCPServer.TOOLS}:
+            raise MCPClientError(f"Unknown tool: {tool_name}")
+        if not isinstance(arguments, dict):
+            raise MCPClientError("Tool arguments must be an object")
+        required = next(tool["inputSchema"].get("required", []) for tool in SurveyAIMCPServer.TOOLS if tool["name"] == tool_name)
+        missing = [field for field in required if not arguments.get(field)]
+        if missing:
+            raise MCPClientError(f"Missing required argument(s): {', '.join(missing)}")
+        claim_id = arguments.get("claim_id")
+        if claim_id is not None and (not isinstance(claim_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", claim_id)):
+            raise MCPClientError("claim_id contains invalid characters")
+        if tool_name == "review_submit_decision":
+            if arguments.get("action") not in {"APPROVE", "REJECT", "EDIT"}:
+                raise MCPClientError("action must be APPROVE, REJECT, or EDIT")
+            if arguments["action"] == "EDIT" and not isinstance(arguments.get("override_value"), dict):
+                raise MCPClientError("EDIT decisions require an override_value object")
+        if tool_name == "report_export" and arguments.get("format", "ALL") not in {"EXCEL", "DOCX", "ALL"}:
+            raise MCPClientError("format must be EXCEL, DOCX, or ALL")
+
+    async def handle_tool_call_async(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        self._validate_arguments(tool_name, arguments)
+        claim_id = arguments.get("claim_id", arguments.get("claim_number", ""))
+        if tool_name == "claim_initialize":
+            return await self._handle_tool_call_async_unlocked(tool_name, arguments)
+        if tool_name in {"pipeline_run", "incremental_ingest", "document_upload", "review_submit_decision", "review_commit_gate", "review_get_findings", "report_export"}:
+            async with self._claim_lock(str(claim_id)):
+                with self._lock:
+                    self.claims_store = self._load_store()
+                return await self._handle_tool_call_async_unlocked(tool_name, arguments)
+        return await self._handle_tool_call_async_unlocked(tool_name, arguments)
+
+    async def _handle_tool_call_async_unlocked(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Execute machine operations against the real pipeline and artifacts."""
         claim_id = arguments.get("claim_id", arguments.get("claim_number", "default-claim"))
 
         if tool_name == "claim_initialize":
             claim_id = arguments.get("claim_id") or str(uuid4())
             claim_data = {
                 "id": claim_id,
-                "claim_number": arguments.get("claim_number"),
-                "registration_number": arguments.get("registration_number", "JH01EX7415"),
-                "policy_number": arguments.get("policy_number", "POL-2026-9901"),
+                "claim_number": arguments["claim_number"],
+                "registration_number": arguments.get("registration_number"),
+                "policy_number": arguments.get("policy_number"),
                 "documents": [],
                 "findings": [],
                 "human_reviews": {},
@@ -233,161 +274,56 @@ class SurveyAIMCPServer:
                 self.claims_store[claim_id] = claim_data
             return {"status": "SUCCESS", "claim": claim_data}
 
-        claim = self.claims_store.get(claim_id, {
-            "id": claim_id,
-            "claim_number": claim_id,
-            "documents": [],
-            "findings": [
-                {
-                    "id": "find-1",
-                    "title": "Front Bumper Replacement Verified",
-                    "finding_type": "DAMAGE_VERIFIED",
-                    "severity": "LOW",
-                    "recommendation": "Approve INR 1,483.90.",
-                },
-                {
-                    "id": "find-2",
-                    "title": "Unsupported Rear Door Repair",
-                    "finding_type": "UNSUPPORTED_REPAIR",
-                    "severity": "HIGH",
-                    "recommendation": "Reject INR 500.00.",
-                },
-            ],
-            "human_reviews": {},
-            "review_committed": False,
-        })
+        claim = self.claims_store.get(claim_id)
+        if not claim:
+            return {"status": "ERROR", "message": f"Claim '{claim_id}' is not initialized."}
 
         if tool_name == "document_upload":
             sanitized_text, injection_detected = SecurityGuardrails.sanitize_untrusted_text(arguments.get("extracted_text", ""))
             doc = {
                 "id": f"doc-{uuid4().hex[:10]}",
-                "file_name": arguments.get("file_name"),
-                "document_type": arguments.get("document_type", "REPAIR_ESTIMATE"),
+                "file_name": arguments["file_name"],
+                "document_type": arguments.get("document_type", "OTHER"),
+                "content_type": arguments.get("content_type", "text/plain"),
                 "extracted_text": sanitized_text,
                 "injection_detected": injection_detected,
             }
+            if any(existing.get("extracted_text") == sanitized_text and existing.get("file_name") == doc["file_name"] for existing in claim.get("documents", [])):
+                return {"status": "SUCCESS", "duplicate": True, "document": next(existing for existing in claim["documents"] if existing.get("file_name") == doc["file_name"] and existing.get("extracted_text") == sanitized_text), "total_documents": len(claim["documents"])}
+            claim["documents"].append(doc)
             with self._store_transaction():
-                claim = self.claims_store.get(claim_id)
-                if not claim:
-                    return {"status": "ERROR", "message": f"Claim '{claim_id}' is not initialized."}
-                claim["documents"].append(doc)
                 self.claims_store[claim_id] = claim
-            return {"status": "SUCCESS", "document": doc, "total_documents": len(claim["documents"])}
+            return {"status": "SUCCESS", "duplicate": False, "document": doc, "total_documents": len(claim["documents"])}
 
-        elif tool_name == "pipeline_run":
-            if not claim.get("documents"):
-                return {"status": "ERROR", "message": "Cannot run pipeline without at least one uploaded document."}
-            if not claim.get("findings"):
-                claim["findings"] = [
-                    {"id": "find-2", "title": "Unsupported repair claim", "finding_type": "UNSUPPORTED_REPAIR", "severity": "HIGH", "description": "Repair item needs human verification against source evidence.", "recommendation": "Reject or override after review."},
-                ]
-            claim["status"] = "AI_PROCESSED"
-            with self._store_transaction():
-                claim = self.claims_store.get(claim_id, claim)
-                claim["human_reviews"][finding_id] = {
-                    "action": action,
-                    "comment": comment,
-                    "override_value": override_value,
-                }
-                self.claims_store[claim_id] = claim
-            return {
-                "status": "SUCCESS",
-                "claim_id": claim_id,
-                "nodes_executed": [
-                    "IntakeNode", "ClassificationNode", "ExtractionNode",
-                    "AccidentUnderstandingNode", "PhotoAnalysisNode",
-                    "ExpectedDamageNode", "EvidenceValidationNode", "ConflictDetectionNode"
-                ],
-                "findings_count": len(claim["findings"]),
-                "findings": claim["findings"],
-            }
+        if tool_name == "review_get_findings":
+            return {"claim_id": claim_id, "findings": claim.get("findings", []), "reviews": claim.get("human_reviews", {}), "is_committed": claim.get("review_committed", False)}
 
-        elif tool_name == "review_get_findings":
-            return {
-                "claim_id": claim_id,
-                "findings": claim["findings"],
-                "reviews": claim["human_reviews"],
-                "is_committed": claim["review_committed"],
-            }
-
-        elif tool_name == "review_submit_decision":
-            finding_id = arguments.get("finding_id")
-            action = arguments.get("action")
-            comment = arguments.get("comment", "")
-            override_value = arguments.get("override_value")
-
-            if not any(f.get("id") == finding_id for f in claim["findings"]):
+        if tool_name == "review_submit_decision":
+            finding_id = arguments["finding_id"]
+            if not any(finding.get("id") == finding_id for finding in claim.get("findings", [])):
                 return {"status": "ERROR", "message": f"Finding '{finding_id}' does not exist."}
             if claim.get("review_committed"):
                 return {"status": "ERROR", "message": "Review gate is already committed and locked."}
-            claim["human_reviews"][finding_id] = {
-                "action": action,
-                "comment": comment,
-                "override_value": override_value,
+            claim.setdefault("human_reviews", {})[finding_id] = {
+                "action": arguments["action"],
+                "comment": arguments.get("comment", ""),
+                "override_value": arguments.get("override_value"),
             }
-            self.claims_store[claim_id] = claim
-            self._save_store()
-            return {
-                "status": "SUCCESS",
-                "finding_id": finding_id,
-                "applied_action": action,
-                "all_reviews": claim["human_reviews"],
-            }
+            with self._store_transaction():
+                self.claims_store[claim_id] = claim
+            return {"status": "SUCCESS", "finding_id": finding_id, "applied_action": arguments["action"], "all_reviews": claim["human_reviews"]}
 
-        elif tool_name == "review_commit_gate":
+        if tool_name == "review_commit_gate":
             if claim.get("review_committed"):
                 return {"status": "SUCCESS", "claim_id": claim_id, "is_committed": True}
-            if not claim.get("findings"):
-                return {"status": "ERROR", "message": "Cannot commit an empty review gate."}
-            missing = [f.get("id") for f in claim["findings"] if f.get("id") not in claim.get("human_reviews", {})]
+            missing = [finding.get("id") for finding in claim.get("findings", []) if finding.get("id") not in claim.get("human_reviews", {})]
             if missing:
                 return {"status": "ERROR", "message": f"Every finding needs an explicit decision before commit: {missing}"}
+            claim["review_committed"] = True
+            claim["status"] = "GATE_COMMITTED"
             with self._store_transaction():
-                claim = self.claims_store.get(claim_id, claim)
-                claim["review_committed"] = True
-                claim["status"] = "GATE_COMMITTED"
                 self.claims_store[claim_id] = claim
             return {"status": "SUCCESS", "claim_id": claim_id, "is_committed": True}
-
-        elif tool_name == "report_export":
-            if not claim.get("review_committed"):
-                return {"status": "ERROR", "message": "Human review gate must be committed before export."}
-            fmt = arguments.get("format", "ALL")
-            return {
-                "status": "SUCCESS",
-                "claim_id": claim_id,
-                "format": fmt,
-                "excel_export_url": f"/api/v1/claims/{claim_id}/reports/export/excel",
-                "docx_export_url": f"/api/v1/claims/{claim_id}/reports/export/docx",
-            }
-
-        elif tool_name == "incremental_ingest":
-            file_name = arguments.get("file_name")
-            return {
-                "status": "SUCCESS",
-                "source_document": file_name,
-                "affected_sections": ["extracted_entities.estimate"],
-                "untouched_sections": ["driver", "vehicle", "fir", "accident_dynamics"],
-                "new_conflicts_surfaced": 1,
-            }
-
-        return {"status": "ERROR", "message": f"Unknown tool: {tool_name}"}
-
-    async def handle_tool_call_async(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        claim_id = arguments.get("claim_id", arguments.get("claim_number", "default-claim"))
-        if tool_name in {"pipeline_run", "incremental_ingest"}:
-            async with self._claim_lock(str(claim_id)):
-                with self._lock:
-                    self.claims_store = self._load_store()
-                return await self._handle_tool_call_async_unlocked(tool_name, arguments)
-        return await self._handle_tool_call_async_unlocked(tool_name, arguments)
-
-    async def _handle_tool_call_async_unlocked(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Execute machine operations against the real pipeline and artifacts."""
-        claim_id = arguments.get("claim_id", arguments.get("claim_number", "default-claim"))
-        claim = self.claims_store.get(claim_id)
-        if not claim:
-            return {"status": "ERROR", "message": f"Claim '{claim_id}' is not initialized."}
 
         if tool_name == "pipeline_run":
             if not claim.get("documents"):
@@ -408,15 +344,6 @@ class SurveyAIMCPServer:
             claim["execution_logs"] = result.get("execution_logs", [])
             claim["decision_events"] = result.get("decision_events", [])
             claim["findings"] = result.get("findings", [])
-            if not claim["findings"] and result.get("status") == "completed":
-                claim["findings"] = [{
-                    "id": "find-2",
-                    "title": "Evidence gap requires surveyor confirmation",
-                    "finding_type": "MISSING_EVIDENCE",
-                    "severity": "MEDIUM",
-                    "description": "The available source set does not contain direct photo evidence for every estimate item.",
-                    "recommendation": "Review the estimate against additional evidence before approval.",
-                }]
             claim["status"] = result.get("status", "completed")
             with self._store_transaction():
                 self.claims_store[claim_id] = claim
@@ -445,6 +372,8 @@ class SurveyAIMCPServer:
             claim["documents"] = updated_state.get("documents", claim.get("documents", []))
             claim["findings"] = updated_state.get("findings", claim.get("findings", []))
             claim["status"] = "incrementally_updated"
+            if delta.get("status") != "IDEMPOTENT_NOOP":
+                claim["review_committed"] = False
             with self._store_transaction():
                 self.claims_store[claim_id] = claim
             return {"status": "SUCCESS", "claim_id": claim_id, **delta}
@@ -490,32 +419,51 @@ class SurveyAIMCPServer:
         """
         Runs stdio JSON-RPC loop handling MCP requests.
         """
-        for line in sys.stdin:
+        while True:
+            line = await asyncio.to_thread(sys.stdin.readline)
+            if not line:
+                break
             if not line.strip():
                 continue
+            request = None
             try:
                 request = json.loads(line)
                 req_id = request.get("id")
                 method = request.get("method")
 
-                if method == "tools/list":
+                if request.get("jsonrpc") != "2.0" or not method:
+                    raise MCPClientError("Invalid JSON-RPC request")
+                if method == "initialize":
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {"tools": {"listChanged": False}},
+                            "serverInfo": {"name": "survey-ai", "version": "1.0.0"},
+                        },
+                    }
+                elif method == "notifications/initialized":
+                    continue
+                elif method == "tools/list":
                     response = {"jsonrpc": "2.0", "id": req_id, "result": {"tools": self.TOOLS}}
                 elif method == "tools/call":
                     params = request.get("params", {})
                     name = params.get("name")
                     arguments = params.get("arguments", {})
-                    if name in {"pipeline_run", "report_export", "incremental_ingest"}:
-                        result = await self.handle_tool_call_async(name, arguments)
-                    else:
-                        result = self.handle_tool_call(name, arguments)
+                    result = await self.handle_tool_call_async(name, arguments)
                     response = {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": json.dumps(result)}]}}
                 else:
-                    response = {"jsonrpc": "2.0", "id": req_id, "result": {}}
+                    response = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Method '{method}' not found"}}
 
                 sys.stdout.write(json.dumps(response) + "\n")
                 sys.stdout.flush()
-            except Exception as e:
-                err_resp = {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": str(e)}}
+            except MCPClientError as exc:
+                err_resp = {"jsonrpc": "2.0", "id": request.get("id") if isinstance(request, dict) else None, "error": {"code": -32602, "message": str(exc)}}
+                sys.stdout.write(json.dumps(err_resp) + "\n")
+                sys.stdout.flush()
+            except Exception as exc:
+                err_resp = {"jsonrpc": "2.0", "id": request.get("id") if isinstance(request, dict) else None, "error": {"code": -32603, "message": str(exc)}}
                 sys.stdout.write(json.dumps(err_resp) + "\n")
                 sys.stdout.flush()
 

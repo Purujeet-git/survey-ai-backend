@@ -121,6 +121,10 @@ class ClaimState(TypedDict, total=False):
     claim_id: str
     run_id: str
     input_fingerprint: str
+    node_attempts: dict[str, int]
+    failed_node: str
+    last_error: str
+    failure_reason: str
     claim_number: str
     organization_id: str | None
     user_id: str

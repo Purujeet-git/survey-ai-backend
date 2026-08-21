@@ -10,7 +10,7 @@ REST API endpoints for Document upload, storage, metadata, versioning, classific
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
@@ -21,9 +21,18 @@ from app.documents.schemas.document import (
     DocumentResponse,
 )
 from app.documents.services.document_service import DocumentService
+from app.documents.services.watcher_service import WatcherManager
+from app.claims.services.claim import ClaimService
 from app.users.models import User
 
 router = APIRouter(tags=["Documents"])
+
+
+def get_watcher_manager(request: Request) -> WatcherManager:
+    manager = getattr(request.app.state, "watcher_manager", None)
+    if manager is None:
+        raise HTTPException(status_code=503, detail="Watcher service is not available")
+    return manager
 
 
 def get_document_service(session: AsyncSession = Depends(get_db)) -> DocumentService:
@@ -51,6 +60,104 @@ async def upload_document(
         document_type=document_type,
     )
     return DocumentResponse.model_validate(doc)
+
+
+@router.post(
+    "/claims/{claim_id}/watchers",
+    status_code=status.HTTP_201_CREATED,
+    summary="Register a watched folder for a claim",
+)
+async def register_watcher(
+    claim_id: UUID,
+    payload: dict[str, str],
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+    manager: WatcherManager = Depends(get_watcher_manager),
+):
+    await ClaimService(session).get_claim(claim_id=claim_id, user_id=current_user.id)
+    try:
+        return await manager.register(str(claim_id), payload.get("path", ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/claims/{claim_id}/watchers",
+    summary="List watched folders for a claim",
+)
+async def list_watchers(
+    claim_id: UUID,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+    manager: WatcherManager = Depends(get_watcher_manager),
+):
+    await ClaimService(session).get_claim(claim_id=claim_id, user_id=current_user.id)
+    return await manager.list_for_claim(str(claim_id))
+
+
+@router.post(
+    "/claims/{claim_id}/watchers/{watch_id}/start",
+    summary="Start watching a registered folder",
+)
+async def start_watcher(
+    claim_id: UUID,
+    watch_id: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+    manager: WatcherManager = Depends(get_watcher_manager),
+):
+    await ClaimService(session).get_claim(claim_id=claim_id, user_id=current_user.id)
+    try:
+        result = await manager.start(watch_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if result["claim_id"] != str(claim_id):
+        raise HTTPException(status_code=404, detail="Watcher does not belong to this claim")
+    return result
+
+
+@router.post(
+    "/claims/{claim_id}/watchers/{watch_id}/stop",
+    summary="Stop watching a registered folder",
+)
+async def stop_watcher(
+    claim_id: UUID,
+    watch_id: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+    manager: WatcherManager = Depends(get_watcher_manager),
+):
+    await ClaimService(session).get_claim(claim_id=claim_id, user_id=current_user.id)
+    try:
+        result = await manager.stop(watch_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if result["claim_id"] != str(claim_id):
+        raise HTTPException(status_code=404, detail="Watcher does not belong to this claim")
+    return result
+
+
+@router.get(
+    "/claims/{claim_id}/watchers/{watch_id}",
+    summary="Get watched folder status",
+)
+async def get_watcher_status(
+    claim_id: UUID,
+    watch_id: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+    manager: WatcherManager = Depends(get_watcher_manager),
+):
+    await ClaimService(session).get_claim(claim_id=claim_id, user_id=current_user.id)
+    try:
+        result = await manager.status(watch_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if result["claim_id"] != str(claim_id):
+        raise HTTPException(status_code=404, detail="Watcher does not belong to this claim")
+    return result
 
 
 @router.get(

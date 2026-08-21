@@ -17,6 +17,10 @@ Runs completely offline without requiring live API keys (fulfills Behavior #7).
 """
 
 import asyncio
+import json
+from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import threading
 from uuid import uuid4
@@ -29,6 +33,7 @@ from app.ai.security_guardrails import SecurityGuardrails
 from app.ai.state import ClaimState, compute_token_cost
 from app.claims.models.claim import Claim
 from app.documents.services.watcher_service import IncrementalUpdateService
+from app.documents.services.watcher_service import WatcherManager
 from app.mcp_server import SurveyAIMCPServer
 from app.users.models.user import User
 
@@ -155,6 +160,91 @@ async def test_concurrent_same_claim_pipeline_runs_are_serialized_and_idempotent
 
 
 @pytest.mark.asyncio
+async def test_transient_stage_failure_retries_and_persists_attempts(monkeypatch):
+    import app.ai.graph as graph_module
+
+    attempts = 0
+
+    async def flaky_extraction(state):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary extraction backend failure")
+        return {
+            "extracted_entities": {"estimate": {"line_items": [], "total_amount": 0.0}},
+            "status": "extraction_completed",
+            "current_node": "ExtractionNode",
+            "execution_logs": [{"node": "ExtractionNode", "status": "SUCCESS", "token_usage": {"input": 0, "output": 0}}],
+        }
+
+    monkeypatch.setattr(graph_module, "extraction_node", flaky_extraction)
+    claim_id = f"claim-retry-{uuid4().hex[:6]}"
+    result = await ClaimAIPipelineService().run_pipeline({
+        "claim_id": claim_id,
+        "documents": [{"id": "doc-1", "file_name": "evidence.txt", "extracted_text": "rear collision"}],
+        "execution_logs": [],
+    })
+
+    assert attempts == 2
+    assert result["status"] == "completed"
+    assert result["node_attempts"]["ExtractionNode"] == 2
+    assert result["last_error"] == ""
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_persists_terminal_failure(monkeypatch):
+    import app.ai.graph as graph_module
+
+    async def broken_extraction(state):
+        raise ValueError("malformed extraction payload")
+
+    monkeypatch.setattr(graph_module, "extraction_node", broken_extraction)
+    claim_id = f"claim-failed-{uuid4().hex[:6]}"
+    result = await ClaimAIPipelineService().run_pipeline({
+        "claim_id": claim_id,
+        "documents": [{"id": "doc-1", "file_name": "evidence.txt", "extracted_text": "rear collision"}],
+        "execution_logs": [],
+    })
+
+    assert result["status"] == "failed_terminal"
+    assert result["failed_node"] == "ExtractionNode"
+    assert result["node_attempts"]["ExtractionNode"] == 3
+    assert result["failure_reason"] == "retry_exhausted"
+    assert "malformed extraction payload" in result["last_error"]
+
+    fresh = StateCheckpointer().load_checkpoint(claim_id)
+    assert fresh["status"] == "failed_terminal"
+    assert fresh["failed_node"] == "ExtractionNode"
+    assert fresh["node_attempts"]["ExtractionNode"] == 3
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_does_not_retry_automatically(monkeypatch):
+    import app.ai.graph as graph_module
+
+    calls = 0
+
+    async def broken_extraction(state):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("permanent extraction failure")
+
+    monkeypatch.setattr(graph_module, "extraction_node", broken_extraction)
+    claim_id = f"claim-failed-resume-{uuid4().hex[:6]}"
+    initial = {
+        "claim_id": claim_id,
+        "documents": [{"id": "doc-1", "file_name": "evidence.txt", "extracted_text": "rear collision"}],
+        "execution_logs": [],
+    }
+    first = await ClaimAIPipelineService().run_pipeline(initial)
+    second = await ClaimAIPipelineService().run_pipeline(initial)
+
+    assert first["status"] == "failed_terminal"
+    assert second == first
+    assert calls == 3
+
+
+@pytest.mark.asyncio
 async def test_duplicate_incremental_document_is_idempotent():
     state: ClaimState = {
         "claim_id": "claim-inc-idempotent",
@@ -178,6 +268,151 @@ async def test_duplicate_incremental_document_is_idempotent():
     assert first_delta["status"] != "IDEMPOTENT_NOOP"
     assert second_delta["status"] == "IDEMPOTENT_NOOP"
     assert second_delta["duplicate"] is True
+
+
+@pytest.mark.asyncio
+async def test_real_watched_folder_ingests_stable_files_and_ignores_unsupported():
+    claim_id = f"claim-folder-{uuid4().hex[:6]}"
+    initial_state: ClaimState = {
+        "claim_id": claim_id,
+        "status": "completed",
+        "current_node": "ConflictDetectionNode",
+        "documents": [{"id": "fir-1", "file_name": "initial_fir.txt", "document_type": "FIR", "extracted_text": "Rear collision"}],
+        "extracted_entities": {"driver": {"name": "Test Driver"}, "policy": {}},
+        "findings": [],
+        "execution_logs": [],
+    }
+    from app.ai.checkpointer import global_checkpointer
+    global_checkpointer.save_checkpoint(claim_id, initial_state)
+
+    with tempfile.TemporaryDirectory() as folder:
+        manager = WatcherManager(poll_interval=0.01, stable_cycles=2)
+        registration = await manager.register(claim_id, folder)
+        await manager.start(registration["watch_id"])
+        Path(folder, "partial_estimate.txt").write_text("Supplemental Invoice ", encoding="utf-8")
+        await asyncio.sleep(0.015)
+        Path(folder, "partial_estimate.txt").write_text("Supplemental Invoice Total: INR 45000.00", encoding="utf-8")
+        Path(folder, "ignore.tmp").write_text("not a document", encoding="utf-8")
+
+        for _ in range(100):
+            state = global_checkpointer.load_checkpoint(claim_id)
+            current_status = await manager.status(registration["watch_id"])
+            if state and len(state.get("documents", [])) == 2 and current_status["ignored_files"] == 1:
+                break
+            await asyncio.sleep(0.01)
+
+        status_result = await manager.status(registration["watch_id"])
+        assert len(state["documents"]) == 2
+        assert state["documents"][1]["file_name"] == "partial_estimate.txt"
+        assert status_result["processed_files"] == 1
+        assert status_result["ignored_files"] == 1
+
+        await manager.stop(registration["watch_id"])
+        stopped_result = await manager.status(registration["watch_id"])
+        assert stopped_result["status"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_watched_folder_duplicate_file_is_processed_once():
+    claim_id = f"claim-folder-duplicate-{uuid4().hex[:6]}"
+    from app.ai.checkpointer import global_checkpointer
+    global_checkpointer.save_checkpoint(claim_id, {
+        "claim_id": claim_id,
+        "status": "completed",
+        "current_node": "ConflictDetectionNode",
+        "documents": [],
+        "extracted_entities": {},
+        "findings": [],
+        "execution_logs": [],
+    })
+
+    with tempfile.TemporaryDirectory() as folder:
+        manager = WatcherManager(poll_interval=0.01, stable_cycles=1)
+        registration = await manager.register(claim_id, folder)
+        await manager.start(registration["watch_id"])
+        Path(folder, "estimate.txt").write_text("Supplemental Invoice Total: INR 100.00", encoding="utf-8")
+        for _ in range(100):
+            state = global_checkpointer.load_checkpoint(claim_id)
+            if state and len(state.get("documents", [])) == 1:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.03)
+        await manager.stop(registration["watch_id"])
+
+        assert len(state["documents"]) == 1
+        assert (await manager.status(registration["watch_id"]))["processed_files"] == 1
+
+
+@pytest.mark.asyncio
+async def test_real_subprocess_crash_and_resume():
+    claim_id = f"claim-process-resume-{uuid4().hex[:6]}"
+    with tempfile.TemporaryDirectory() as checkpoint_dir:
+        runner = r'''
+import asyncio
+import json
+import os
+import sys
+from app.ai.checkpointer import StateCheckpointer
+import app.ai.graph as graph_module
+
+checkpoint_dir, claim_id, mode = sys.argv[1:]
+graph_module.global_checkpointer = StateCheckpointer(checkpoint_dir)
+
+async def fast_classification(state):
+    return {"classification_results": {"doc-1": {"classified_type": "OTHER", "confidence": 1.0}}, "status": "classification_completed", "current_node": "ClassificationNode", "execution_logs": [{"node": "ClassificationNode", "status": "SUCCESS"}]}
+
+graph_module.classification_node = fast_classification
+
+if mode == "crash":
+    async def slow_extraction(state):
+        await asyncio.sleep(30)
+        return {"extracted_entities": {"estimate": {"line_items": [], "total_amount": 0.0}}, "status": "extraction_completed", "current_node": "ExtractionNode", "execution_logs": []}
+    graph_module.extraction_node = slow_extraction
+
+async def main():
+    state = {"claim_id": claim_id, "documents": [{"id": "doc-1", "file_name": "evidence.txt", "extracted_text": "Vehicle hit from behind."}], "execution_logs": []}
+    result = await graph_module.ClaimAIPipelineService().run_pipeline(state)
+    print(json.dumps({"status": result.get("status"), "current_node": result.get("current_node"), "nodes": [log.get("node") for log in result.get("execution_logs", [])]}), flush=True)
+
+asyncio.run(main())
+'''
+        process = subprocess.Popen(
+            [sys.executable, "-c", runner, checkpoint_dir, claim_id, "crash"],
+            cwd=Path(__file__).parents[1],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        checkpoint_path = Path(checkpoint_dir, f"{claim_id}.json")
+        for _ in range(2000):
+            if checkpoint_path.exists():
+                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                if checkpoint.get("current_node") == "ExtractionNode" and checkpoint.get("status") == "in_progress":
+                    break
+            await asyncio.sleep(0.01)
+        else:
+            process.kill()
+            stdout, stderr = process.communicate(timeout=5)
+            pytest.fail(f"subprocess did not persist an in-progress extraction checkpoint; stdout={stdout!r}; stderr={stderr!r}")
+
+        process.kill()
+        process.communicate(timeout=5)
+        assert process.returncode is not None
+
+        resumed = subprocess.run(
+            [sys.executable, "-c", runner, checkpoint_dir, claim_id, "resume"],
+            cwd=Path(__file__).parents[1],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        result = json.loads(resumed.stdout.strip().splitlines()[-1])
+
+        assert result["status"] == "completed"
+        assert result["current_node"] == "ConflictDetectionNode"
+        assert result["nodes"].count("IntakeNode") == 1
+        assert result["nodes"].count("ClassificationNode") == 1
+        assert result["nodes"].count("ExtractionNode") == 1
 
 
 @pytest.mark.asyncio
@@ -351,23 +586,53 @@ def test_mcp_server_machine_driving():
     pipeline_res = server.handle_tool_call("pipeline_run", {"claim_id": claim_id})
     assert pipeline_res["status"] == "SUCCESS"
     assert len(pipeline_res["nodes_executed"]) == 8
+    assert pipeline_res["findings"] == []
 
-    # 4. Review Findings
-    review_res = server.handle_tool_call("review_submit_decision", {
-        "claim_id": claim_id,
-        "finding_id": "find-2",
-        "action": "REJECT",
-        "comment": "Programmatically rejected unsupported rear door repair."
-    })
-    assert review_res["status"] == "SUCCESS"
-    assert review_res["applied_action"] == "REJECT"
-
-    # 5. Commit Review Gate
+    # 4. Commit an honest zero-finding review gate
     commit_res = server.handle_tool_call("review_commit_gate", {"claim_id": claim_id})
     assert commit_res["status"] == "SUCCESS"
     assert commit_res["is_committed"] is True
 
-    # 6. Export Reports
+    # 5. Export Reports
     export_res = server.handle_tool_call("report_export", {"claim_id": claim_id, "format": "ALL"})
     assert export_res["status"] == "SUCCESS"
     assert "excel_export_url" in export_res
+
+
+def test_mcp_rejects_uninitialized_claim_and_invalid_review_input():
+    server = SurveyAIMCPServer()
+
+    missing = server.handle_tool_call("review_get_findings", {"claim_id": "missing-claim"})
+    assert missing["status"] == "ERROR"
+    assert "not initialized" in missing["message"]
+
+    with pytest.raises(ValueError, match="action must be"):
+        server.handle_tool_call("review_submit_decision", {
+            "claim_id": "missing-claim",
+            "finding_id": "finding-1",
+            "action": "MAYBE",
+        })
+
+
+def test_mcp_stdio_protocol_handshake_and_errors():
+    requests = "\n".join([
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        json.dumps({"jsonrpc": "2.0", "id": 3, "method": "unknown/method", "params": {}}),
+    ]) + "\n"
+    completed = subprocess.run(
+        [sys.executable, "-m", "app.mcp_server"],
+        cwd=Path(__file__).parents[1],
+        input=requests,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    responses = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+
+    assert responses[0]["id"] == 1
+    assert responses[0]["result"]["protocolVersion"] == "2025-06-18"
+    assert responses[1]["id"] == 2
+    assert responses[1]["result"]["tools"]
+    assert responses[2]["id"] == 3
+    assert responses[2]["error"]["code"] == -32601
